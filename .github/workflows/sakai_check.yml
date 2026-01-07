@@ -1,29 +1,46 @@
-name: Sakai announcements check
+name: Sakai Announcement Bot
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # every 30 minutes
-  workflow_dispatch: {}
+    # Run every 30 minutes
+    - cron: '*/30 * * * *'
+  
+  # Allow manual triggering
+  workflow_dispatch:
 
 jobs:
-  run-sakai-check:
+  check-announcements:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
+      
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install selenium requests webdriver-manager
-      - name: Run sakai bot
+          pip install -r requirements.txt
+      
+      - name: Run Sakai bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SAKAI_USERNAME: ${{ secrets.SAKAI_USERNAME }}
           SAKAI_PASSWORD: ${{ secrets.SAKAI_PASSWORD }}
+          SAKAI_URL: https://online.deu.edu.tr/portal
           HEADLESS: '1'
-        run: |
-          python sakai_bot_final.py
+        run: python sakai_bot_final.py
+      
+      - name: Upload announcements log
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: bot-logs
+          path: duyurular.json
+          retention-days: 7

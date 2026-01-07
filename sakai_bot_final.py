@@ -1,571 +1,622 @@
 # -*- coding: utf-8 -*-
+"""
+Sakai LMS Announcement Bot
+Automatically fetches announcements from Sakai and sends them via Telegram.
+"""
+
 import json
 import os
-import time
 import sys
+import time
+import logging
 from datetime import datetime
+from typing import List, Dict, Optional
+
+import requests
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.edge.options import Options
-import requests
-import re
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.firefox.options import Options as FirefoxOptions
 
-# UTF-8 encoding
-if sys.stdout.encoding != 'utf-8':
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+    ]
+)
+logger = logging.getLogger(__name__)
 
-# --- TELEGRAM AYARLARI (ENV ile konfigüre edilebilir) ---
-import os
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-
-# --- SAKAI AYARLARI (ENV ile konfigüre edilebilir) ---
-SAKAI_URL = os.getenv("SAKAI_URL", "https://online.deu.edu.tr/portal")
-SAKAI_DUYURU_URL = os.getenv("SAKAI_DUYURU_URL", "https://online.deu.edu.tr/portal/site/8661eecd-4a01-4a2a-a0ae-7722b165e914/tool/1f87c11b-7dbd-4619-b91d-a2f9c37e1e7c?panel=Main")
-SAKAI_USERNAME = os.getenv("SAKAI_USERNAME", "")
-SAKAI_PASSWORD = os.getenv("SAKAI_PASSWORD", "")
-
-# Headless kontrolü (use "1" or "true")
+# --- ENVIRONMENT CONFIGURATION ---
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+SAKAI_URL = os.getenv("SAKAI_URL", "https://online.deu.edu.tr/portal").strip()
+SAKAI_USERNAME = os.getenv("SAKAI_USERNAME", "").strip()
+SAKAI_PASSWORD = os.getenv("SAKAI_PASSWORD", "").strip()
 HEADLESS = os.getenv("HEADLESS", "0").lower() in ("1", "true", "yes")
 
-# --- DOSYALAR ---
-DUYURULAR_FILE = "duyurular.json"
+# --- CONSTANTS ---
+ANNOUNCEMENTS_FILE = "duyurular.json"
+TIMEOUT_PAGE_LOAD = 10
+TIMEOUT_ELEMENT = 15
+MAX_ANNOUNCEMENTS = 20
+TELEGRAM_RATE_LIMIT = 1.0
 
-def telegram_bildirim_gonder(baslik, icerik):
-    """Telegram'a bildirim gönder"""
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    
-    mesaj = f"""
-<b>📢 YENİ DUYURU</b>
 
-<b>{baslik}</b>
-
-{icerik}
-"""
-    
-    veri = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": mesaj,
-        "parse_mode": "HTML"
+def validate_configuration() -> bool:
+    """Validate required environment variables."""
+    required_vars = {
+        "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
+        "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
+        "SAKAI_USERNAME": SAKAI_USERNAME,
+        "SAKAI_PASSWORD": SAKAI_PASSWORD,
     }
+
+    for var_name, var_value in required_vars.items():
+        if not var_value:
+            logger.error(f"Missing environment variable: {var_name}")
+            return False
+
+    return True
+
+
+def send_telegram_notification(title: str, content: str) -> bool:
+    """
+    Send notification to Telegram.
+    
+    Args:
+        title: Announcement title
+        content: Announcement content
+        
+    Returns:
+        True if successful, False otherwise
+    """
     try:
-        response = requests.post(url, json=veri)
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        
+        message = f"<b>📢 YENİ DUYURU</b>\n\n<b>{title}</b>\n\n{content}"
+        
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        
+        response = requests.post(url, json=payload, timeout=10)
+        
         if response.status_code == 200:
-            print(f"[✓] Telegram bildirimi gönderildi: {baslik}")
+            logger.info(f"Telegram notification sent: {title}")
+            return True
         else:
-            print(f"[✗] Telegram hatası: {response.text}")
+            logger.error(f"Telegram error: {response.text}")
+            return False
+            
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Telegram connection error: {e}")
+        return False
     except Exception as e:
-        print(f"[✗] Telegram bağlantı hatası: {e}")
-
-
-def fetch_content_from_href(driver, href):
-    """Verilen href'i yeni sekmede açıp içerik bulmaya çalışır, string döner."""
-    icerik = ''
+        logger.error(f"Unexpected error sending notification: {e}")
+        return False
+def get_webdriver():
+    """Initialize WebDriver with appropriate browser."""
     try:
+        options = ChromeOptions()
+        if HEADLESS:
+            options.add_argument("--headless=new")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+        
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        
+        driver = webdriver.Chrome(options=options)
+        logger.info("Chrome WebDriver initialized")
+        return driver
+        
+    except Exception as e:
+        logger.warning(f"Chrome initialization failed, trying Firefox: {e}")
+        try:
+            options = FirefoxOptions()
+            if HEADLESS:
+                options.add_argument("--headless")
+            
+            driver = webdriver.Firefox(options=options)
+            logger.info("Firefox WebDriver initialized")
+            return driver
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize any WebDriver: {e}")
+            raise
+
+
+def extract_content_from_link(driver, href: str) -> str:
+    """
+    Open link in new tab and extract content.
+    
+    Args:
+        driver: Selenium WebDriver instance
+        href: URL to fetch content from
+        
+    Returns:
+        Extracted content as string
+    """
+    content = ""
+    original_window = None
+    
+    try:
+        original_window = driver.current_window_handle
         driver.execute_script('window.open(arguments[0]);', href)
         driver.switch_to.window(driver.window_handles[-1])
         time.sleep(2)
-
-        selectors = ['.announcementBody', '.announcement-content', '.msgBody', '#main', '.portletBody', '.sakai-content', '.content', 'article', '#content']
-        content_text = ''
+        
+        # Try various CSS selectors for content
+        selectors = [
+            '.announcementBody', '.announcement-content', '.msgBody',
+            '#main', '.portletBody', '.sakai-content', '.content', 'article'
+        ]
+        
         for selector in selectors:
             try:
-                c = driver.find_element(By.CSS_SELECTOR, selector)
-                content_text = c.text.strip()
-                if content_text:
+                element = driver.find_element(By.CSS_SELECTOR, selector)
+                text = element.text.strip()
+                if text and len(text) > 20:
+                    content = text
                     break
-            except:
+            except Exception:
                 continue
-
-        if not content_text:
+        
+        # Fallback: get body text
+        if not content:
             try:
-                candidates = driver.find_elements(By.XPATH, "//*[contains(@id,'msg') or contains(@id,'announcement') or contains(@class,'msg') or contains(@class,'announcement')]")
-                for c in candidates:
-                    t = c.text.strip()
-                    if t and len(t) > 20:
-                        content_text = t
-                        break
-            except:
+                body = driver.find_element(By.TAG_NAME, 'body')
+                content = body.text.strip()
+            except Exception:
                 pass
-
-        if not content_text:
-            try:
-                content_text = driver.find_element(By.TAG_NAME, 'body').text.strip()
-            except:
-                content_text = ''
-
-        icerik = content_text
-    except Exception:
-        icerik = ''
+                
+    except Exception as e:
+        logger.warning(f"Error extracting content from {href}: {e}")
     finally:
         try:
             driver.close()
-        except:
+            if original_window:
+                driver.switch_to.window(original_window)
+        except Exception:
             pass
-        try:
-            driver.switch_to.window(driver.window_handles[0])
-        except:
-            pass
-
-    return icerik
-
-def sakai_duyurlari_al():
-    """Sakai'ye giriş yap ve Duyuru panelini oku"""
     
-    options = Options()
-    if HEADLESS:
-        options.add_argument("--headless=new")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--window-size=1920,1080")
+    return content
 
-    # Selenium Manager will find appropriate driver/browser
-    driver = webdriver.Edge(options=options)
-    duyurular = []
+def fetch_announcements(driver) -> List[Dict[str, str]]:
+    """
+    Fetch announcements from Sakai LMS.
+    
+    Args:
+        driver: Selenium WebDriver instance
+        
+    Returns:
+        List of announcement dictionaries
+    """
+    announcements = []
     
     try:
-        # Portal ana sayfasını aç
+        logger.info("Fetching Sakai portal...")
         driver.get(SAKAI_URL)
-        time.sleep(5)
-
-        # Otomatik giriş: eğer bullhorn görünmüyorsa kullanıcı bilgileriyle giriş dene
+        time.sleep(TIMEOUT_PAGE_LOAD)
+        
+        # Check if already logged in
         logged_in = False
         try:
             driver.find_element(By.ID, 'Mrphs-bullhorn')
             logged_in = True
-        except:
-            logged_in = False
-
-        if not logged_in and SAKAI_USERNAME and SAKAI_PASSWORD:
-            print("[→] Otomatik giriş denemesi yapılıyor...")
-
-            def try_fill_and_submit(context_driver):
-                try:
-                    u = None
-                    p = None
-                    # username selectors
-                    for sel in [('name','eid'),('name','username'),('id','eid'),('id','username'),('name','j_username'),('id','j_username')]:
-                        try:
-                            u = context_driver.find_element(getattr(By, sel[0].upper()), sel[1])
-                            break
-                        except:
-                            u = None
-                    # password selectors
-                    for sel in [('name','pw'),('name','password'),('id','pw'),('id','password'),('name','j_password'),('id','j_password')]:
-                        try:
-                            p = context_driver.find_element(getattr(By, sel[0].upper()), sel[1])
-                            break
-                        except:
-                            p = None
-
-                    if u and p:
-                        try:
-                            u.clear()
-                        except:
-                            pass
-                        u.send_keys(SAKAI_USERNAME)
-                        try:
-                            p.clear()
-                        except:
-                            pass
-                        p.send_keys(SAKAI_PASSWORD)
-
-                        submitted = False
-                        # submit button candidates
-                        for bsel in [(By.CSS_SELECTOR, "input[type='submit']"), (By.CSS_SELECTOR, "button[type='submit']"), (By.XPATH, "//button[contains(., 'Giriş') or contains(., 'Login')]") , (By.XPATH, "//input[@type='submit']")]:
-                            try:
-                                btn = context_driver.find_element(bsel[0], bsel[1])
-                                try:
-                                    btn.click()
-                                except:
-                                    context_driver.execute_script('arguments[0].click();', btn)
-                                submitted = True
-                                break
-                            except:
-                                continue
-
-                        if not submitted:
-                            try:
-                                p.submit()
-                                submitted = True
-                            except:
-                                pass
-
-                        return submitted
-                except:
-                    return False
-
-            submitted = False
-            try:
-                submitted = try_fill_and_submit(driver)
-            except:
-                submitted = False
-
-            if not submitted:
-                # try inside iframes
-                try:
-                    frames = driver.find_elements(By.TAG_NAME, 'iframe')
-                except:
-                    frames = []
-                for frame in frames:
-                    try:
-                        driver.switch_to.frame(frame)
-                        if try_fill_and_submit(driver):
-                            submitted = True
-                            driver.switch_to.default_content()
-                            break
-                        driver.switch_to.default_content()
-                    except:
-                        try:
-                            driver.switch_to.default_content()
-                        except:
-                            pass
-
-            if submitted:
-                try:
-                    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, 'Mrphs-bullhorn')))
-                    print("[✓] Otomatik giriş başarılı")
-                except:
-                    print("[!] Otomatik giriş denendi ama bullhorn bulunamadı; bekleniyor...")
-                    time.sleep(3)
-
-        # Eğer bildirim (bullhorn) varsa, tıklayıp oradaki linkleri al
-        try:
-            bull = driver.find_element(By.ID, 'Mrphs-bullhorn')
-            counter = 0
-            try:
-                cnt = bull.find_element(By.ID, 'bullhorn-counter')
-                counter = int(re.sub(r"\D", "", cnt.text.strip() or "0"))
-            except:
-                try:
-                    cnt2 = bull.find_element(By.CLASS_NAME, 'bullhorn-counter-red')
-                    counter = int(re.sub(r"\D", "", cnt2.text.strip() or "0"))
-                except:
-                    counter = 0
-
-            if counter > 0:
-                print(f"[→] {counter} yeni bildirim var, bildirim paneli açılıyor...")
-                try:
-                    driver.execute_script('arguments[0].click();', bull)
-                except:
-                    try:
-                        bull.click()
-                    except:
-                        pass
-                time.sleep(2)
-
-                # Bildirim panelindeki announcement linklerini bul
-                links = driver.find_elements(By.XPATH, "//a[contains(@href, '/announcement/msg/') or contains(@href, '/announcement') or contains(@href, 'directtool')]")
-                found = 0
-                for a in links:
-                    try:
-                        href = a.get_attribute('href')
-                        link_text = a.text.strip() or ''
-                        # varsa author span'ını al
-                        author = None
-                        try:
-                            author_span = a.find_element(By.CSS_SELECTOR, '.portal-bullhorn-display-name')
-                            author = author_span.text.strip()
-                        except:
-                            author = None
-
-                        # Başlık tahmini: author mevcutsa metinden ayıkla, değilse link_text kullan
-                        baslik_guess = link_text
-                        if author and author in link_text:
-                            try:
-                                after = link_text.split(author, 1)[1].strip()
-                                baslik_guess = after if after else link_text
-                            except:
-                                baslik_guess = link_text
-
-                        if href:
-                            content = fetch_content_from_href(driver, href)
-                            duyurular.append({
-                                'baslik': baslik_guess or href,
-                                'icerik': content,
-                                'tarih': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            })
-                            found += 1
-                    except:
-                        pass
-
-                if found:
-                    print(f"[✓] {found} bildirim içeriği okundu")
-                    return duyurular
+            logger.info("Already logged in")
         except Exception:
-            pass
-
-        # Duyuru panelini ara
-        print("[→] Duyuru paneli aranıyor...")
-
-        # Çeşitli XPath'ler dene
-        duyuru_elements = []
-
-        # XPath 1: Duyuru başlığı içerenler
-        try:
-            duyuru_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'Duyuru') or contains(text(), 'Announcement')]")
-            print(f"[!] Duyuru elementi bulundu (XPath 1): {len(duyuru_elements)}")
-        except:
-            pass
-
-        # Eğer bulunamazsa, panel container'ı ara
-        if not duyuru_elements:
-            try:
-                panel = driver.find_element(By.XPATH, "//div[contains(@class, 'announcement') or contains(@class, 'news') or contains(@class, 'duyuru')]")
-                duyuru_elements = panel.find_elements(By.XPATH, ".//*[contains(@class, 'item') or contains(@class, 'entry')]")
-                print(f"[!] Panel container'ından öğeler bulundu: {len(duyuru_elements)}")
-            except:
-                pass
-
-        # Tüm divleri listele ve duyuru araştır
-        if not duyuru_elements:
-            print("[!] Standart selectors çalışmadı, sayfadaki tüm öğeler kontrol ediliyor...")
-            
-            # Sayfadaki tüm öğeleri al ve kontrol et
-            all_divs = driver.find_elements(By.XPATH, "//div | //li | //article")
-            
-            for elem in all_divs[:120]:  # Daha fazla kontrol
-                try:
-                    text = elem.text
-                    if text and len(text) > 10:  # En az 10 karakter
-                        # "Duyuru" kelimesini içeriyor mu kontrol et
-                        if any(word in text.lower() for word in ['duyuru', 'announcement', 'başlık', 'title', 'subject']):
-                            duyuru_elements.append(elem)
-                except:
-                    pass
-
-        # Duyurular'ı parse et (daha iyi içerik yakalamak için link varsa aç)
-        print(f"[→] {len(duyuru_elements)} potansiyel duyuru öğesi kontrol ediliyor...")
+            logged_in = False
         
-        for elem in duyuru_elements[:20]:  # Max 20
+        # Attempt auto-login if needed
+        if not logged_in and SAKAI_USERNAME and SAKAI_PASSWORD:
+            logger.info("Attempting automatic login...")
+            if attempt_login(driver):
+                logger.info("Login successful")
+            else:
+                logger.warning("Login attempt failed")
+        
+        # Try to fetch from notifications first
+        announcements = fetch_from_notifications(driver)
+        if announcements:
+            return announcements
+        
+        # Fallback: search for announcements on page
+        logger.info("Searching for announcements on page...")
+        announcements = search_page_announcements(driver)
+        
+        return announcements
+        
+    except Exception as e:
+        logger.error(f"Error fetching announcements: {e}")
+        send_telegram_notification("BOT ERROR", f"Failed to fetch announcements:\n{str(e)}")
+        return []
+
+
+def attempt_login(driver) -> bool:
+    """
+    Attempt to log in to Sakai.
+    
+    Args:
+        driver: Selenium WebDriver instance
+        
+    Returns:
+        True if login successful, False otherwise
+    """
+    try:
+        username_selectors = [
+            (By.NAME, 'eid'), (By.NAME, 'username'),
+            (By.ID, 'eid'), (By.ID, 'username'),
+            (By.NAME, 'j_username'), (By.ID, 'j_username')
+        ]
+        
+        password_selectors = [
+            (By.NAME, 'pw'), (By.NAME, 'password'),
+            (By.ID, 'pw'), (By.ID, 'password'),
+            (By.NAME, 'j_password'), (By.ID, 'j_password')
+        ]
+        
+        username_elem = None
+        password_elem = None
+        
+        for selector in username_selectors:
+            try:
+                username_elem = driver.find_element(*selector)
+                break
+            except Exception:
+                continue
+        
+        for selector in password_selectors:
+            try:
+                password_elem = driver.find_element(*selector)
+                break
+            except Exception:
+                continue
+        
+        if not username_elem or not password_elem:
+            # Try in iframes
+            for iframe in driver.find_elements(By.TAG_NAME, 'iframe'):
+                try:
+                    driver.switch_to.frame(iframe)
+                    for selector in username_selectors:
+                        try:
+                            username_elem = driver.find_element(*selector)
+                            break
+                        except Exception:
+                            continue
+                    for selector in password_selectors:
+                        try:
+                            password_elem = driver.find_element(*selector)
+                            break
+                        except Exception:
+                            continue
+                    driver.switch_to.default_content()
+                    if username_elem and password_elem:
+                        break
+                except Exception:
+                    try:
+                        driver.switch_to.default_content()
+                    except Exception:
+                        pass
+        
+        if not username_elem or not password_elem:
+            return False
+        
+        username_elem.clear()
+        username_elem.send_keys(SAKAI_USERNAME)
+        password_elem.clear()
+        password_elem.send_keys(SAKAI_PASSWORD)
+        
+        # Submit login
+        submit_button = None
+        for by, value in [
+            (By.CSS_SELECTOR, "input[type='submit']"),
+            (By.CSS_SELECTOR, "button[type='submit']"),
+            (By.XPATH, "//button[contains(., 'Giriş') or contains(., 'Login')]")
+        ]:
+            try:
+                submit_button = driver.find_element(by, value)
+                break
+            except Exception:
+                continue
+        
+        if submit_button:
+            driver.execute_script('arguments[0].click();', submit_button)
+        else:
+            password_elem.submit()
+        
+        # Wait for login completion
+        try:
+            WebDriverWait(driver, TIMEOUT_ELEMENT).until(
+                EC.presence_of_element_located((By.ID, 'Mrphs-bullhorn'))
+            )
+            return True
+        except Exception:
+            return False
+            
+    except Exception as e:
+        logger.warning(f"Login error: {e}")
+        return False
+
+
+def fetch_from_notifications(driver) -> List[Dict[str, str]]:
+    """
+    Fetch announcements from notification panel.
+    
+    Args:
+        driver: Selenium WebDriver instance
+        
+    Returns:
+        List of announcement dictionaries
+    """
+    announcements = []
+    
+    try:
+        bullhorn = driver.find_element(By.ID, 'Mrphs-bullhorn')
+        
+        # Get notification count
+        count = 0
+        try:
+            counter_elem = bullhorn.find_element(By.ID, 'bullhorn-counter')
+            count = int(''.join(filter(str.isdigit, counter_elem.text or "0")))
+        except Exception:
+            try:
+                counter_elem = bullhorn.find_element(By.CLASS_NAME, 'bullhorn-counter-red')
+                count = int(''.join(filter(str.isdigit, counter_elem.text or "0")))
+            except Exception:
+                count = 0
+        
+        if count == 0:
+            logger.info("No new notifications")
+            return announcements
+        
+        logger.info(f"Found {count} new notifications")
+        driver.execute_script('arguments[0].click();', bullhorn)
+        time.sleep(2)
+        
+        # Find announcement links
+        links = driver.find_elements(
+            By.XPATH,
+            "//a[contains(@href, '/announcement/msg/') or contains(@href, '/announcement') or contains(@href, 'directtool')]"
+        )
+        
+        for link in links:
+            try:
+                href = link.get_attribute('href')
+                if not href:
+                    continue
+                
+                link_text = link.text.strip()
+                
+                # Try to extract author name
+                author = None
+                try:
+                    author_elem = link.find_element(By.CSS_SELECTOR, '.portal-bullhorn-display-name')
+                    author = author_elem.text.strip()
+                except Exception:
+                    pass
+                
+                # Extract title
+                title = link_text
+                if author and author in link_text:
+                    try:
+                        title = link_text.split(author, 1)[1].strip()
+                    except Exception:
+                        pass
+                
+                if not title:
+                    title = href
+                
+                content = extract_content_from_link(driver, href)
+                
+                announcements.append({
+                    "title": title,
+                    "content": content,
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+            except Exception as e:
+                logger.warning(f"Error processing notification link: {e}")
+                continue
+        
+        logger.info(f"Fetched {len(announcements)} announcement(s) from notifications")
+        return announcements
+        
+    except Exception as e:
+        logger.info(f"Notifications not available: {e}")
+        return announcements
+
+
+def search_page_announcements(driver) -> List[Dict[str, str]]:
+    """
+    Search for announcements on the current page.
+    
+    Args:
+        driver: Selenium WebDriver instance
+        
+    Returns:
+        List of announcement dictionaries
+    """
+    announcements = []
+    
+    try:
+        # Find potential announcement elements
+        keywords = ['duyuru', 'announcement', 'başlık', 'title', 'subject']
+        elements = []
+        
+        for elem in driver.find_elements(By.XPATH, "//div | //li | //article")[:100]:
+            try:
+                text = elem.text
+                if text and len(text) > 10:
+                    if any(kw in text.lower() for kw in keywords):
+                        elements.append(elem)
+            except Exception:
+                continue
+        
+        logger.info(f"Found {len(elements)} potential announcement element(s)")
+        
+        for elem in elements[:MAX_ANNOUNCEMENTS]:
             try:
                 text = elem.text.strip()
                 if not text or len(text) < 5:
                     continue
-
-                # Deneyecek: başlık için heading veya ilk satır
-                baslik = None
-                for tag in ['h1','h2','h3','h4','h5','strong','b','a']:
+                
+                # Extract title (first line or heading)
+                title = None
+                for tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'strong', 'b']:
                     try:
-                        el = elem.find_element(By.TAG_NAME, tag)
-                        val = el.text.strip()
-                        if val:
-                            baslik = val
+                        heading = elem.find_element(By.TAG_NAME, tag)
+                        title = heading.text.strip()
+                        if title:
                             break
-                    except:
-                        pass
-
-                if not baslik:
-                    satirlar = text.split('\n')
-                    baslik = satirlar[0]
-
-                icerik = ''
-
-                # Eğer içinde link varsa, takip et ve detay sayfasından içeriği al
+                    except Exception:
+                        continue
+                
+                if not title:
+                    lines = text.split('\n')
+                    title = lines[0] if lines else text
+                
+                # Extract content from link if available
+                content = ""
                 try:
-                    a = elem.find_element(By.TAG_NAME, 'a')
-                    href = a.get_attribute('href')
+                    link = elem.find_element(By.TAG_NAME, 'a')
+                    href = link.get_attribute('href')
                     if href:
-                        # open link in new tab and switch
-                        driver.execute_script('window.open(arguments[0]);', href)
-                        driver.switch_to.window(driver.window_handles[-1])
-                        # wait for page
-                        time.sleep(2)
-                        content_text = ''
-
-                        # If URL pattern indicates announcement detail, try specific selectors
-                        try:
-                            url_lower = href.lower()
-                        except:
-                            url_lower = ''
-
-                        selectors = []
-                        if '/announcement/msg/' in url_lower or 'directtool' in url_lower:
-                            selectors = ['.announcementBody', '.announcement-content', '.msgBody', '#main', '.portletBody', '.sakai-content']
-                        else:
-                            selectors = ['.announcementBody', '.announcement-content', '.content', 'article', '#content', '#main']
-
-                        for selector in selectors:
-                            try:
-                                c = driver.find_element(By.CSS_SELECTOR, selector)
-                                content_text = c.text.strip()
-                                if content_text:
-                                    break
-                            except:
-                                continue
-
-                        # As a fallback, try to find element with id or class containing 'msg' or 'announcement'
-                        if not content_text:
-                            try:
-                                candidates = driver.find_elements(By.XPATH, "//*[contains(@id,'msg') or contains(@id,'announcement') or contains(@class,'msg') or contains(@class,'announcement')]")
-                                for c in candidates:
-                                    t = c.text.strip()
-                                    if t and len(t) > 20:
-                                        content_text = t
-                                        break
-                            except:
-                                pass
-
-                        if not content_text:
-                            # fallback to whole body
-                            try:
-                                content_text = driver.find_element(By.TAG_NAME, 'body').text.strip()
-                            except:
-                                content_text = ''
-
-                        icerik = content_text
-                        # close tab and switch back
-                        driver.close()
-                        driver.switch_to.window(driver.window_handles[0])
+                        content = extract_content_from_link(driver, href)
                 except Exception:
-                    # fallback: use element's remaining text
-                    satirlar = text.split('\n')
-                    icerik = '\n'.join(satirlar[1:]).strip() if len(satirlar) > 1 else ''
-
-                duyurular.append({
-                    "baslik": baslik.strip(),
-                    "icerik": icerik.strip(),
-                    "tarih": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    lines = text.split('\n')
+                    content = '\n'.join(lines[1:]) if len(lines) > 1 else ""
+                
+                announcements.append({
+                    "title": title.strip(),
+                    "content": content.strip(),
+                    "timestamp": datetime.now().isoformat()
                 })
-            except Exception:
-                pass
-        # Duyuru panelini ara
-        print("[→] Duyuru paneli aranıyor...")
+                
+            except Exception as e:
+                logger.warning(f"Error processing announcement element: {e}")
+                continue
         
-        # Çeşitli XPath'ler dene
-        duyuru_elements = []
-        
-        # XPath 1: Duyuru başlığı içerenler
-        try:
-            duyuru_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'Duyuru') or contains(text(), 'Announcement')]")
-            print(f"[!] Duyuru elementi bulundu (XPath 1): {len(duyuru_elements)}")
-        except:
-            pass
-        
-        # Eğer bulunamazsa, panel container'ı ara
-        if not duyuru_elements:
-            try:
-                panel = driver.find_element(By.XPATH, "//div[contains(@class, 'announcement') or contains(@class, 'news') or contains(@class, 'duyuru')]")
-                duyuru_elements = panel.find_elements(By.XPATH, ".//*[contains(@class, 'item') or contains(@class, 'entry')]")
-                print(f"[!] Panel container'ından öğeler bulundu: {len(duyuru_elements)}")
-            except:
-                pass
-        
-        # Tüm divleri listele ve duyuru araştır
-        if not duyuru_elements:
-            print("[!] Standart selectors çalışmadı, sayfadaki tüm öğeler kontrol ediliyor...")
-            
-            # Sayfadaki tüm öğeleri al ve kontrol et
-            all_divs = driver.find_elements(By.XPATH, "//div | //li | //article")
-            
-            for elem in all_divs[:50]:  # İlk 50'yi kontrol et
-                try:
-                    text = elem.text
-                    if text and len(text) > 10:  # En az 10 karakter
-                        # "Duyuru" kelimesini içeriyor mu kontrol et
-                        if any(word in text.lower() for word in ['duyuru', 'announcement', 'başlık', 'title', 'subject']):
-                            duyuru_elements.append(elem)
-                except:
-                    pass
-        
-        # Duyurular'ı parse et
-        print(f"[→] {len(duyuru_elements)} potansiyel duyuru öğesi kontrol ediliyor...")
-        
-        for elem in duyuru_elements[:10]:  # Max 10
-            try:
-                text = elem.text.strip()
-                if text and len(text) > 5:
-                    # Başlık ve içerik olarak böl (ilk satır başlık, rest içerik)
-                    satırlar = text.split('\n')
-                    baslik = satırlar[0]
-                    icerik = '\n'.join(satırlar[1:]) if len(satırlar) > 1 else ""
-                    
-                    duyurular.append({
-                        "baslik": baslik.strip(),
-                        "icerik": icerik.strip(),
-                        "tarih": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
-            except:
-                pass
-        
-        print(f"[✓] {len(duyurular)} duyuru başarıyla okundu")
-        
-        # Sayfayı görüntüle (debug için)
-        print("\n[!] Sayfadaki Duyuru Paneli: ")
-        print("=" * 50)
-        for i, d in enumerate(duyurular, 1):
-            print(f"\n{i}. Başlık: {d['baslik']}")
-            print(f"   İçerik: {d['icerik'][:100]}...")
-        print("=" * 50)
-        
-        return duyurular
+        logger.info(f"Found {len(announcements)} announcement(s) on page")
+        return announcements
         
     except Exception as e:
-        print(f"[✗] Hata: {e}")
-        import traceback
-        traceback.print_exc()
-        telegram_bildirim_gonder("BOT HATASI", f"Sakai botunda hata oluştu:\n{str(e)}")
-        return []
-    
-    finally:
-        time.sleep(2)
-        driver.quit()
+        logger.error(f"Error searching page announcements: {e}")
+        return announcements
 
-def duyurlari_kaydet(duyurular):
-    """Duyuruları JSON dosyasına kaydet"""
-    if os.path.exists(DUYURULAR_FILE):
-        with open(DUYURULAR_FILE, 'r', encoding='utf-8') as f:
-            eski_duyurular = json.load(f)
-    else:
-        eski_duyurular = []
-    
-    with open(DUYURULAR_FILE, 'w', encoding='utf-8') as f:
-        json.dump(duyurular, f, ensure_ascii=False, indent=2)
-    
-    return eski_duyurular
 
-def yeni_duyurulari_bul(yeni_duyurular, eski_duyurular):
-    """Yeni duyuruları tespit et"""
-    yeni = []
-    eski_basliklari = {d["baslik"] for d in eski_duyurular}
+def load_saved_announcements() -> List[Dict[str, str]]:
+    """Load previously saved announcements."""
+    try:
+        if os.path.exists(ANNOUNCEMENTS_FILE):
+            with open(ANNOUNCEMENTS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.warning(f"Error loading announcements file: {e}")
     
-    for duyuru in yeni_duyurular:
-        if duyuru["baslik"] not in eski_basliklari:
-            yeni.append(duyuru)
+    return []
+
+
+def save_announcements(announcements: List[Dict[str, str]]) -> None:
+    """Save announcements to file."""
+    try:
+        with open(ANNOUNCEMENTS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(announcements, f, ensure_ascii=False, indent=2)
+        logger.info(f"Saved {len(announcements)} announcement(s)")
+    except Exception as e:
+        logger.error(f"Error saving announcements: {e}")
+
+
+def find_new_announcements(
+    current: List[Dict[str, str]],
+    previous: List[Dict[str, str]]
+) -> List[Dict[str, str]]:
+    """
+    Find new announcements by comparing current and previous.
     
-    return yeni
+    Args:
+        current: Current announcements
+        previous: Previously saved announcements
+        
+    Returns:
+        List of new announcements
+    """
+    previous_titles = {ann["title"] for ann in previous}
+    new = [ann for ann in current if ann["title"] not in previous_titles]
+    
+    logger.info(f"Found {len(new)} new announcement(s)")
+    return new
+
 
 def main():
-    """Ana fonksiyon"""
-    print("=" * 60)
-    print(f"SAKAI DUYURU BOT - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
+    """Main bot function."""
+    logger.info("=" * 60)
+    logger.info(f"SAKAI ANNOUNCEMENT BOT - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("=" * 60)
     
-    # Duyuruları al
-    yeni_duyurular = sakai_duyurlari_al()
+    # Validate configuration
+    if not validate_configuration():
+        logger.error("Configuration validation failed. Exiting.")
+        return False
     
-    if not yeni_duyurular:
-        print("[!] Duyuru bulunamadı")
-        return
+    driver = None
     
-    # Eski duyuruları al
-    eski_duyurular = duyurlari_kaydet(yeni_duyurular)
-    
-    # Yeni olanları tespit et
-    yeni = yeni_duyurulari_bul(yeni_duyurular, eski_duyurular)
-    
-    if yeni:
-        print(f"\n[✓] {len(yeni)} YENİ DUYURU BULUNDU!")
-        for duyuru in yeni:
-            telegram_bildirim_gonder(duyuru["baslik"], duyuru["icerik"])
-            time.sleep(1)  # Rate limiting
-    else:
-        print("[✓] Yeni duyuru yok, hepsi zaten okundu")
-    
-    print("=" * 60)
+    try:
+        # Initialize WebDriver
+        driver = get_webdriver()
+        
+        # Fetch announcements
+        current_announcements = fetch_announcements(driver)
+        
+        if not current_announcements:
+            logger.info("No announcements found")
+            return True
+        
+        # Load previous announcements
+        previous_announcements = load_saved_announcements()
+        
+        # Save current announcements
+        save_announcements(current_announcements)
+        
+        # Find new announcements
+        new_announcements = find_new_announcements(current_announcements, previous_announcements)
+        
+        # Send notifications for new announcements
+        if new_announcements:
+            logger.info(f"Sending {len(new_announcements)} notification(s)")
+            for announcement in new_announcements:
+                send_telegram_notification(
+                    announcement["title"],
+                    announcement["content"]
+                )
+                time.sleep(TELEGRAM_RATE_LIMIT)
+        else:
+            logger.info("No new announcements")
+        
+        logger.info("=" * 60)
+        return True
+        
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}", exc_info=True)
+        send_telegram_notification("BOT ERROR", f"Unexpected error:\n{str(e)}")
+        return False
+        
+    finally:
+        if driver:
+            try:
+                driver.quit()
+                logger.info("WebDriver closed")
+            except Exception as e:
+                logger.warning(f"Error closing WebDriver: {e}")
+
 
 if __name__ == "__main__":
-    main()
+    success = main()
+    sys.exit(0 if success else 1)
