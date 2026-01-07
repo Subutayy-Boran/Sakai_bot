@@ -540,6 +540,7 @@ def find_new_announcements(
 ) -> List[Dict[str, str]]:
     """
     Find new announcements by comparing current and previous.
+    Handles both old and new JSON formats for backward compatibility.
     
     Args:
         current: Current announcements
@@ -548,8 +549,15 @@ def find_new_announcements(
     Returns:
         List of new announcements
     """
-    previous_titles = {ann["title"] for ann in previous}
-    new = [ann for ann in current if ann["title"] not in previous_titles]
+    previous_titles = set()
+    
+    # Handle both old format (baslik) and new format (title)
+    for ann in previous:
+        title = ann.get("title") or ann.get("baslik")
+        if title:
+            previous_titles.add(title)
+    
+    new = [ann for ann in current if (ann.get("title") or ann.get("baslik")) not in previous_titles]
     
     logger.info(f"Found {len(new)} new announcement(s)")
     return new
