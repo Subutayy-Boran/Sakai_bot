@@ -39,7 +39,7 @@ jobs:
       
       - name: Upload announcements log
         if: failure()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: bot-logs
           path: duyurular.json
