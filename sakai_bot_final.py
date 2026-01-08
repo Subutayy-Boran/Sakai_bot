@@ -249,12 +249,18 @@ def fetch_announcements(driver) -> List[Dict[str, str]]:
         announcements = fetch_from_notifications(driver)
         if announcements:
             return announcements
-        
-        # Fallback: search for announcements on page
-        logger.info("Searching for announcements on page...")
-        announcements = search_page_announcements(driver)
-        
-        return announcements
+
+        # By default we DO NOT fallback to scanning the whole page because
+        # that produces false positives (course lists / menus). If you want
+        # the old behavior, set environment variable `ALLOW_PAGE_SEARCH=1`.
+        allow_page_search = os.getenv("ALLOW_PAGE_SEARCH", "0").lower() in ("1", "true", "yes")
+        if allow_page_search:
+            logger.info("No panel notifications found — falling back to page search (ALLOW_PAGE_SEARCH=1)")
+            announcements = search_page_announcements(driver)
+            return announcements
+
+        logger.info("No notifications in panel and page search disabled — skipping")
+        return []
         
     except Exception as e:
         logger.error(f"Error fetching announcements: {e}")
