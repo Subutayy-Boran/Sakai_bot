@@ -431,7 +431,28 @@ def fetch_from_notifications(driver) -> List[Dict[str, str]]:
             except Exception:
                 pass
         
-        for item in items:
+        # Prefer items that include the bullhorn icon used for announcements
+        icon_filtered_items = []
+        for it in items:
+            try:
+                if it.find_elements(By.CSS_SELECTOR, '.icon-sakai--academic-bullhorn'):
+                    icon_filtered_items.append(it)
+                    continue
+            except Exception:
+                pass
+        # If no items contained the icon within the panel items, try a wider ancestor search
+        if not icon_filtered_items:
+            try:
+                icon_ancestors = driver.find_elements(By.XPATH, "//*[contains(@class,'icon-sakai--academic-bullhorn')]/ancestor::li[1] | //*[contains(@class,'icon-sakai--academic-bullhorn')]/ancestor::div[1]")
+                if icon_ancestors:
+                    logger.info(f"Found {len(icon_ancestors)} items via icon ancestor search")
+                    icon_filtered_items = icon_ancestors
+            except Exception:
+                pass
+
+        processing_items = icon_filtered_items if icon_filtered_items else items
+
+        for item in processing_items:
             try:
                 # Get full text from item
                 item_text = item.text.strip()
