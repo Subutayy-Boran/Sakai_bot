@@ -431,28 +431,58 @@ def fetch_from_notifications(driver) -> List[Dict[str, str]]:
             except Exception:
                 pass
         
-        # Prefer items that include the bullhorn icon used for announcements
-        icon_filtered_items = []
+        # Build a strict candidate list: prefer items with the bullhorn icon
+        # or items with announcement-like hrefs. If neither exists, do not process
+        # general page elements to avoid course lists/menus being captured.
+        candidates = []
+
+        # 1) items that contain the bullhorn icon
         for it in items:
             try:
                 if it.find_elements(By.CSS_SELECTOR, '.icon-sakai--academic-bullhorn'):
-                    icon_filtered_items.append(it)
-                    continue
+                    candidates.append(it)
             except Exception:
-                pass
-        # If no items contained the icon within the panel items, try a wider ancestor search
-        if not icon_filtered_items:
+                continue
+
+        # 2) items that include a link to an announcement detail
+        if not candidates:
+            for it in items:
+                try:
+                    link = None
+                    try:
+                        link = it.find_element(By.TAG_NAME, 'a')
+                    except Exception:
+                        pass
+                    href = None
+                    if link:
+                        href = link.get_attribute('href')
+                    else:
+                        try:
+                            href = it.get_attribute('href')
+                        except Exception:
+                            href = None
+
+                    if href and ('/announcement/msg/' in href or '/announcement' in href or 'directtool' in href):
+                        candidates.append(it)
+                except Exception:
+                    continue
+
+        # 3) try ancestor search for icon if still nothing
+        if not candidates:
             try:
                 icon_ancestors = driver.find_elements(By.XPATH, "//*[contains(@class,'icon-sakai--academic-bullhorn')]/ancestor::li[1] | //*[contains(@class,'icon-sakai--academic-bullhorn')]/ancestor::div[1]")
                 if icon_ancestors:
                     logger.info(f"Found {len(icon_ancestors)} items via icon ancestor search")
-                    icon_filtered_items = icon_ancestors
+                    candidates = icon_ancestors
             except Exception:
                 pass
 
-        processing_items = icon_filtered_items if icon_filtered_items else items
+        # If still no candidates, stop early to avoid false positives
+        if not candidates:
+            logger.info("No announcement-like items found in notification panel; skipping")
+            return announcements
 
-        for item in processing_items:
+        for item in candidates:
             try:
                 # Get full text from item
                 item_text = item.text.strip()
