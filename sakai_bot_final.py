@@ -371,6 +371,7 @@ def attempt_login(driver) -> bool:
 def fetch_from_notifications(driver) -> List[Dict[str, str]]:
     """
     Fetch announcements from notification panel.
+    Uses notification panel text directly when available.
     
     Args:
         driver: Selenium WebDriver instance
@@ -403,49 +404,81 @@ def fetch_from_notifications(driver) -> List[Dict[str, str]]:
         driver.execute_script('arguments[0].click();', bullhorn)
         time.sleep(2)
         
-        # Find announcement links
-        links = driver.find_elements(
-            By.XPATH,
-            "//a[contains(@href, '/announcement/msg/') or contains(@href, '/announcement') or contains(@href, 'directtool')]"
-        )
-        
-        for link in links:
+        # Find all notification items in the panel
+        items = []
+        for xpath in [
+            "//ul[@id='notification-list']//li",
+            "//div[contains(@class, 'notification-item')]",
+            "//*[contains(@class, 'bullhorn')]//li",
+            "//div[contains(@class, 'portal-bullhorn-list')]//li"
+        ]:
             try:
-                href = link.get_attribute('href')
-                if not href:
+                items = driver.find_elements(By.XPATH, xpath)
+                if items:
+                    logger.info(f"Found {len(items)} items via XPath")
+                    break
+            except Exception:
+                continue
+        
+        # Fallback: find all links with announcement hrefs
+        if not items:
+            try:
+                items = driver.find_elements(
+                    By.XPATH,
+                    "//a[contains(@href, '/announcement/msg/') or contains(@href, 'directtool')]"
+                )
+                logger.info(f"Found {len(items)} items via link search")
+            except Exception:
+                pass
+        
+        for item in items:
+            try:
+                # Get full text from item
+                item_text = item.text.strip()
+                if not item_text or len(item_text) < 5:
                     continue
                 
-                link_text = link.text.strip()
-                
-                # Try to extract author name
-                author = None
+                # Try to find link
+                href = None
                 try:
-                    author_elem = link.find_element(By.CSS_SELECTOR, '.portal-bullhorn-display-name')
-                    author = author_elem.text.strip()
+                    link_elem = item.find_element(By.TAG_NAME, 'a')
+                    href = link_elem.get_attribute('href')
                 except Exception:
-                    pass
-                
-                # Extract title
-                title = link_text
-                if author and author in link_text:
                     try:
-                        title = link_text.split(author, 1)[1].strip()
+                        href = item.get_attribute('href')
                     except Exception:
                         pass
                 
-                if not title:
-                    title = href
+                # Split title and content from panel text
+                lines = item_text.split('\n')
+                title = lines[0].strip() if lines else item_text
+                panel_content = '\n'.join(lines[1:]).strip() if len(lines) > 1 else ""
                 
-                content = extract_content_from_link(driver, href)
+                # Use panel content if available and substantial
+                content = panel_content if panel_content and len(panel_content) > 30 else ""
+                
+                # Only fetch detail page if:
+                # 1. We have a link AND
+                # 2. Panel content is too short/empty
+                if href and (not content or len(content) < 50):
+                    logger.info(f"Fetching detail content from: {href}")
+                    detail_content = extract_content_from_link(driver, href)
+                    if detail_content and len(detail_content) > len(content):
+                        content = detail_content
+                
+                # Fallback: use item text if no content extracted
+                if not content:
+                    content = item_text
                 
                 announcements.append({
                     "title": title,
                     "content": content,
                     "timestamp": datetime.now().isoformat()
                 })
+                logger.info(f"Added announcement: {title[:50]}...")
                 
             except Exception as e:
-                logger.warning(f"Error processing notification link: {e}")
+                logger.warning(f"Error processing notification item: {e}")
                 continue
         
         logger.info(f"Fetched {len(announcements)} announcement(s) from notifications")
