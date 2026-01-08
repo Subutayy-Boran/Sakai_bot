@@ -169,11 +169,33 @@ def extract_content_from_link(driver, href: str) -> str:
             except Exception:
                 continue
         
-        # Fallback: get body text
+        # Fallback: get body text but filter out navigation/menu items
         if not content:
             try:
                 body = driver.find_element(By.TAG_NAME, 'body')
-                content = body.text.strip()
+                full_text = body.text.strip()
+                
+                # Filter out common menu/navigation items
+                filters = [
+                    'Takvim', 'Kaynaklar', 'Duyurular', 'Ayarlar',
+                    'External Tools', 'Yardım', 'Araç gezgini',
+                    'Ders Listesi', 'Bağlantı', 'Sunucu Detayları',
+                    'Copyright', 'Apereo', 'Ana Sayfa Destek',
+                    'Profil', 'Genel Bakış', 'Ders Oluşturma'
+                ]
+                
+                lines = [
+                    line.strip() 
+                    for line in full_text.split('\n') 
+                    if line.strip() and not any(f in line for f in filters)
+                ]
+                
+                content = '\n'.join(lines)
+                
+                # Limit length to first 1000 characters
+                if len(content) > 1000:
+                    content = content[:1000] + "..."
+                    
             except Exception:
                 pass
                 
