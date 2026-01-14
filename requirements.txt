@@ -1,0 +1,11 @@
+# Selenium - Web browser automation
+selenium==4.15.2
+
+# Requests - HTTP library for Telegram API
+requests==2.31.0
+
+# Webdriver Manager - Automatic ChromeDriver/GeckoDriver management
+webdriver-manager==4.0.1
+
+# Dotenv - Load environment variables from .env file
+python-dotenv==1.0.0

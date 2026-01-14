@@ -1,0 +1,55 @@
+name: Sakai Announcement Bot
+
+on:
+  schedule:
+    # GitHub Actions minimum interval is 30 minutes
+    - cron: '*/30 * * * *'
+  
+  # Allow manual triggering from Actions tab
+  workflow_dispatch:
+
+jobs:
+  check-announcements:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run Sakai bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SAKAI_USERNAME: ${{ secrets.SAKAI_USERNAME }}
+          SAKAI_PASSWORD: ${{ secrets.SAKAI_PASSWORD }}
+          SAKAI_URL: https://online.deu.edu.tr/portal
+          HEADLESS: '1'
+        run: python sakai_bot.py
+      
+      - name: Commit and push changes
+        run: |
+          git config --global user.name 'GitHub Actions Bot'
+          git config --global user.email 'actions@github.com'
+          git add duyurular.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update announcements state" && git push)
+      
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-state
+          path: duyurular.json
+          retention-days: 7
